@@ -1,0 +1,11 @@
+eventlet
+Flask
+Flask-SocketIO
+paho-mqtt
+google-cloud-bigquery
+numpy
+pandas
+scipy
+PyWavelets
+joblib
+neurokit2
