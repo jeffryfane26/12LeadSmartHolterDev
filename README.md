@@ -52,6 +52,7 @@ Perangkat terhubung ke broker MQTT (broker.hivemq.com:1883).
 Perangkat mulai membaca sensor EKG dan mengirimkan data secara kontinu ke topik MQTT (ecg/device_01/data) dalam format biner 63-byte yang terstruktur.
 
 Format Paket Data Biner (63-byte):
+
 Setiap data yang dikirim oleh ESP32 dalam CLOUD_MODE memiliki struktur:
   Byte 0: STX (0x02) - Penanda awal paket
   Byte 1-8 (8 bytes): Timestamp (dalam microsecond)
