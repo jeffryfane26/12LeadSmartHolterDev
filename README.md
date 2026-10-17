@@ -6,7 +6,7 @@
 [![Google Cloud](https://img.shields.io/badge/cloud-Google%20BigQuery-4285F4.svg)](https://cloud.google.com/bigquery)
 [![NeuroKit2](https://img.shields.io/badge/DSP-NeuroKit2-green.svg)](https://github.com/neuropsychology/NeuroKit)
 
-An end-to-end, medical-grade IoT platform for continuous, real-time 12-lead electrocardiogram (ECG) acquisition, high-throughput cloud streaming, digital signal processing (DSP), and automated arrhythmia screening.
+An end-to-end, IoT platform for continuous, real-time 12-lead electrocardiogram (ECG) acquisition, high-throughput cloud streaming, digital signal processing (DSP), and automated arrhythmia screening.
 
 Developed by **CTAI Laboratory**, this system couples an ultra-low-power ESP32 edge acquisition Holter with a scalable Google Cloud Platform (GCP) ingestion and analytics backend.
 
