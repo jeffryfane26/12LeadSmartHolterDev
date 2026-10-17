@@ -9,3 +9,5 @@ scipy
 PyWavelets
 joblib
 neurokit2
+scikit-learn
+xgboost

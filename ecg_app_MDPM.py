@@ -1,3 +1,18 @@
+"""
+12-Lead Smart Holter Backend & Multi-Device Monitoring Platform (MDPM)
+======================================================================
+Author: CTAI Laboratory
+Technologies: Python, Flask, Flask-SocketIO, eventlet, Paho-MQTT, Google Cloud BigQuery,
+              NumPy, SciPy, PyWavelets, Joblib, NeuroKit2, Scikit-learn, XGBoost.
+
+This module acts as the centralized cloud ingestion server and real-time dashboard
+for continuous 12-lead ECG telemetry streamed from ESP32 edge devices. It receives
+compact binary telemetry frames (63-byte metrics or 51-byte legacy) via MQTT, decodes
+24-bit multi-lead signals, measures transmission QoS (latency, jitter, packet loss),
+buffers data asynchronously for Google BigQuery ingestion, and executes a clinical-grade
+DSP and machine learning classification pipeline upon recording triggers.
+"""
+
 import eventlet
 eventlet.monkey_patch()
 
@@ -26,7 +41,7 @@ import joblib
 import neurokit2 as nk
 
 # ==================================================================
-# Konfigurasi Aplikasi (MODIFIED)
+# Application Configuration & Environment Settings
 # ==================================================================
 MQTT_BROKER = os.getenv("MQTT_BROKER", "broker.hivemq.com")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
@@ -46,10 +61,10 @@ FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 
 SPS = 853
 BUFFER_SIZE = 8000
-DEVICE_TIMEOUT_S = 15 # <-- ADDED: Detik sebelum device dianggap offline
+DEVICE_TIMEOUT_S = 15  # Seconds of silence before device is considered offline
 
 # ==================================================================
-# Inisialisasi Aplikasi (MODIFIED)
+# Application Initialization
 # ==================================================================
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
@@ -114,13 +129,13 @@ HTML_TEMPLATE = """
     <div class="row">
         <div class="pill">Broker: <span class="value">{{broker}}:{{port}}</span></div>
         <div class="pill">Topic: <span class="value">{{topic}}</span></div>
-        <div id="sock" class="pill">Socket: Menghubungkan...</div>
+        <div id="sock" class="pill">Socket: Connecting...</div>
     </div>
     <div class="panel">
-        <h3>Pilih Device (untuk Tampilan Detail)</h3>
+        <h3>Select Device (for Detailed View)</h3>
         <div class="row">
             <select id="device-selector" style="min-width: 250px;"></select>
-            <div id="selected-device" class="pill">Device Terpilih: <span class="value">-</span></div>
+            <div id="selected-device" class="pill">Selected Device: <span class="value">-</span></div>
         </div>
     </div>
     <div class="tabs">
@@ -130,11 +145,11 @@ HTML_TEMPLATE = """
     </div>
     <div id="ecg-view" class="tab-content" style="display: block;">
         <div class="panel">
-            <h3>Kontrol Perekaman</h3>
+            <h3>Recording Control</h3>
             <div class="row">
-                <input id="subject" type="text" placeholder="ID Subjek (wajib diisi)" size="30"/>
-                <button id="start">Mulai Perekaman</button>
-                <button id="stop">Hentikan Manual</button>
+                <input id="subject" type="text" placeholder="Subject ID (Required)" size="30"/>
+                <button id="start">Start Recording</button>
+                <button id="stop">Stop Recording</button>
             </div>
             <div class="row">
                 <div class="pill">Status: <span id="status" class="value">Idle</span></div>
@@ -155,7 +170,7 @@ HTML_TEMPLATE = """
             <div class="grid" id="cards"></div>
         </div>
         <div class="panel history-panel">
-            <h3>Riwayat Klasifikasi</h3>
+            <h3>Classification History</h3>
             <table id="history-table">
                 <thead>
                     <tr>
@@ -163,7 +178,7 @@ HTML_TEMPLATE = """
                         <th>Device ID</th>
                         <th>Subject ID</th>
                         <th>Recording ID</th>
-                        <th>Hasil Klasifikasi</th>
+                        <th>Classification Result</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -289,13 +304,13 @@ HTML_TEMPLATE = """
         // --- END: UI OPTIMIZATION ---
 
         const socket = io({ transports: ['websocket'] });
-        socket.on('connect', () => { sockEl.textContent = 'Socket: Terhubung'; sockEl.classList.add('ok'); });
-        socket.on('disconnect', () => { sockEl.textContent = 'Socket: Terputus'; sockEl.classList.add('bad'); sockEl.classList.remove('ok'); });
+        socket.on('connect', () => { sockEl.textContent = 'Socket: Connected'; sockEl.classList.add('ok'); });
+        socket.on('disconnect', () => { sockEl.textContent = 'Socket: Disconnected'; sockEl.classList.add('bad'); sockEl.classList.remove('ok'); });
         
         socket.on('device_list_update', (devices) => {
             console.log('Available devices:', devices);
             const previouslySelected = deviceSelector.value;
-            deviceSelector.innerHTML = '<option value="">-- Pilih Device --</option>';
+            deviceSelector.innerHTML = '<option value="">-- Select Device --</option>';
             devices.sort().forEach(devId => {
                 const option = document.createElement('option');
                 option.value = devId;
@@ -308,7 +323,7 @@ HTML_TEMPLATE = """
                 if (previouslySelected === currentDevice) {
                     currentDevice = null;
                     selectedDeviceEl.textContent = '-';
-                    // Kosongkan tampilan detail jika device yang dipilih hilang
+                    // Clear detailed view if selected device is removed
                     chartData.length = 0; chartLabels.length = 0; ecgChart.update();
                     Object.values(valueElements).forEach(el => el.textContent = '-');
                     Object.values(perfValueElements).forEach(el => el.textContent = '-');
@@ -320,11 +335,10 @@ HTML_TEMPLATE = """
             }
         });
 
-        // --- MODIFIED: deviceSelector.onchange ---
         deviceSelector.onchange = () => {
             const selectedDevId = deviceSelector.value;
 
-            // Bersihkan semua buffer dan UI elemen yang relevan
+            // Clear buffers and relevant UI elements
             liveDataBuffer.length = 0;
             chartData.length = 0;
             chartLabels.length = 0;
@@ -349,8 +363,8 @@ HTML_TEMPLATE = """
 
         startBtn.onclick = () => {
             const subjectId = subjectInput.value.trim();
-            if (!currentDevice) { alert('Silakan pilih device terlebih dahulu.'); return; }
-            if (!subjectId) { alert('Silakan masukkan ID Subjek.'); return; }
+            if (!currentDevice) { alert('Please select a device first.'); return; }
+            if (!subjectId) { alert('Please enter a Subject ID.'); return; }
             socket.emit('start_recording', { device_id: currentDevice, subject_id: subjectId });
         };
 
@@ -359,9 +373,8 @@ HTML_TEMPLATE = """
             socket.emit('stop_recording', { device_id: currentDevice });
         };
         
-        // --- MODIFIED: state_update ---
         socket.on('state_update', data => {
-            if (data.device_id !== currentDevice) return; // <-- ADDED FILTER
+            if (data.device_id !== currentDevice) return;
             const isRecording = data.is_recording;
             startBtn.style.display = isRecording ? 'none' : 'inline-block';
             stopBtn.style.display = isRecording ? 'inline-block' : 'none';
@@ -377,9 +390,8 @@ HTML_TEMPLATE = """
             }
         });
         
-        // --- MODIFIED: live_data ---
         socket.on('live_data', pkt => {
-            if (pkt.device_id !== currentDevice) return; // <-- ADDED FILTER
+            if (pkt.device_id !== currentDevice) return;
             liveDataBuffer.push(pkt);
             if (!isRendering) {
                 isRendering = true;
@@ -387,9 +399,8 @@ HTML_TEMPLATE = """
             }
         });
 
-        // --- MODIFIED: performance_update ---
         socket.on('performance_update', data => {
-            if (data.device_id !== currentDevice) return; // <-- ADDED FILTER
+            if (data.device_id !== currentDevice) return;
             packetFormatEl.textContent = data.packet_format || 'Legacy (51-byte)';
             Object.entries(data).forEach(([key, value]) => {
                 const el = perfValueElements[key];
@@ -402,7 +413,7 @@ HTML_TEMPLATE = """
 
         socket.on('global_performance_update', (data) => {
             const activeDeviceIds = data.map(d => d.device_id);
-            overviewTableBody.innerHTML = ''; // Selalu bersihkan dan gambar ulang
+            overviewTableBody.innerHTML = '';
             data.forEach(device => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
@@ -417,19 +428,18 @@ HTML_TEMPLATE = """
             });
         });
         
-        // --- MODIFIED: progress_update ---
         socket.on('progress_update', data => {
-            if (data.device_id !== currentDevice) return; // <-- ADDED FILTER
+            if (data.device_id !== currentDevice) return;
             const percent = (data.current / data.total) * 100;
             progressBar.style.width = percent + '%';
-            progressLabel.textContent = `${data.current} / ${data.total} sampel`;
+            progressLabel.textContent = `${data.current} / ${data.total} samples`;
         });
         
         function fetchHistory() {
             fetch('/api/history')
                 .then(response => response.json())
                 .then(data => {
-                    if (data.error) { console.error("Gagal mengambil riwayat:", data.error); return; }
+                    if (data.error) { console.error("Failed to fetch history:", data.error); return; }
                     historyTableBody.innerHTML = '';
                     data.forEach(rec => {
                         const row = document.createElement('tr');
@@ -441,7 +451,7 @@ HTML_TEMPLATE = """
         }
 
         socket.on('history_updated', () => {
-            console.log('Menerima event history_updated, memuat ulang riwayat...');
+            console.log('Received history_updated event, reloading history...');
             fetchHistory();
         });
         
@@ -453,10 +463,20 @@ HTML_TEMPLATE = """
 """
 
 # ==================================================================
-# Fungsi Bantuan & Inisialisasi BigQuery
+# BigQuery Initialization & Helper Functions
 # ==================================================================
 def ensure_bq_tables():
-    print("Memastikan tabel BigQuery...")
+    """Verifies and initializes required BigQuery datasets and tables.
+    
+    Checks for the existence of:
+    - Dataset: GCP_PROJECT_ID.DATASET_ID
+    - Table: ecg_raw_per_sample (stores raw 12-lead ADC records)
+    - Table: ecg_classifications (stores ML arrhythmia prediction outcomes)
+    - Table: ecg_performance_metrics (stores packet QoS and telemetry statistics)
+    
+    Creates any missing datasets or tables with their predefined schema.
+    """
+    print("Verifying BigQuery tables...")
     dataset = bigquery.Dataset(f"{GCP_PROJECT_ID}.{DATASET_ID}")
     dataset.location = "US"
     try:
@@ -480,7 +500,7 @@ def ensure_bq_tables():
             bigquery.SchemaField("v5", "INTEGER"), bigquery.SchemaField("v6", "INTEGER"),
         ]
         bq.create_table(bigquery.Table(RAW_TABLE_REF, schema=schema))
-        print(f"Tabel {RAW_TABLE_ID} berhasil dibuat.")
+        print(f"Table {RAW_TABLE_ID} created successfully.")
         
     try:
         bq.get_table(CLS_TABLE_REF)
@@ -493,7 +513,7 @@ def ensure_bq_tables():
             bigquery.SchemaField("classification", "STRING"),
         ]
         bq.create_table(bigquery.Table(CLS_TABLE_REF, schema=schema))
-        print(f"Tabel {CLS_TABLE_ID} berhasil dibuat.")
+        print(f"Table {CLS_TABLE_ID} created successfully.")
         
     try:
         bq.get_table(PERF_TABLE_REF)
@@ -509,12 +529,12 @@ def ensure_bq_tables():
             bigquery.SchemaField("packet_loss_pct_cumulative", "FLOAT"),
         ]
         bq.create_table(bigquery.Table(PERF_TABLE_REF, schema=schema))
-        print(f"Tabel {PERF_TABLE_ID} berhasil dibuat.")
+        print(f"Table {PERF_TABLE_ID} created successfully.")
 
 ensure_bq_tables()
 
 # ==================================================================
-# DSP & Model ML (No Changes)
+# DSP & Machine Learning Model Loading
 # ==================================================================
 scaler = model_xgb = kmeans_abnormal = None
 try:
@@ -522,7 +542,7 @@ try:
     model_xgb = joblib.load(os.path.join(MODEL_PATH, 'model_xgb_binary.joblib'))
     kmeans_abnormal = joblib.load(os.path.join(MODEL_PATH, 'kmeans_abnormal_model.joblib'))
 except Exception as e:
-    print(f"[PERINGATAN] Gagal memuat model ML: {e}")
+    print(f"[WARNING] Failed to load ML model: {e}")
 
 LEAD_KEYS_STRING = ["I", "II", "III", "AVR", "AVL", "AVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 LEAD_KEYS_COLUMN = ["lead_I", "lead_II", "lead_III", "avr", "avl", "avf", "v1", "v2", "v3", "v4", "v5", "v6"]
@@ -532,8 +552,37 @@ LSB_SIZE = VREF / (2**RESOLUTION - 1)
 ADC_EDGE = 0.95 * (2**23 - 1)
 
 def to_mV(adc):
+    """Converts raw 24-bit integer ADC counts to millivolts (mV).
+    
+    Formula:
+        mV = adc * (VREF / (2^RESOLUTION - 1)) * 1000.0 / GAIN
+    
+    Args:
+        adc: Numeric or array-like raw ADC values.
+        
+    Returns:
+        Converted physical potential in millivolts (mV).
+    """
     return adc * LSB_SIZE * 1000.0 / GAIN
+
+
 def despike_hampel(x, k=7, nsigma=6.0):
+    """Attenuates high-amplitude impulse spikes using a Hampel outlier filter.
+    
+    Computes rolling median and Median Absolute Deviation (MAD) over a window
+    of size 2k + 1. Samples exceeding nsigma standard deviations are replaced
+    via 1D linear interpolation across clean neighboring samples.
+    
+    Args:
+        x (np.ndarray): Input 1D ECG signal array.
+        k (int): Half-window length in samples (default 7).
+        nsigma (float): Number of standard deviations for outlier gating (default 6.0).
+        
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            - xi: Cleaned ECG signal array.
+            - mask: Boolean mask indicating detected outlier indices.
+    """
     x = np.asarray(x, dtype=float)
     med = scipy.signal.medfilt(x, kernel_size=2*k+1)
     diff = np.abs(x - med)
@@ -545,7 +594,22 @@ def despike_hampel(x, k=7, nsigma=6.0):
         idx = np.arange(len(x))
         xi[mask] = np.interp(idx[mask], idx[~mask], x[~mask])
     return xi, mask
+
+
 def desaturate_edges(x):
+    """Detects and interpolates clipped/saturated ADC samples.
+    
+    Clips occurring at >= 95% of the 24-bit headroom (due to electrode detachment
+    or rail saturation) are masked and linearly interpolated.
+    
+    Args:
+        x (np.ndarray): Input 1D ECG signal array.
+        
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            - xi: Desaturated ECG signal array.
+            - mask: Boolean mask indicating saturated sample locations.
+    """
     x = np.asarray(x, dtype=float)
     mask = (np.abs(x) >= ADC_EDGE)
     xi = x.copy()
@@ -553,7 +617,26 @@ def desaturate_edges(x):
         idx = np.arange(len(x))
         xi[mask] = np.interp(idx[mask], idx[~mask], x[~mask])
     return xi, mask
+
+
 def apply_iec_diagnostic_filter(signal, fs):
+    """Applies IEC 60601-2-51 diagnostic bandpass and notch filtering.
+    
+    Implements:
+    - 2-second edge reflection padding to prevent filter edge transients.
+    - 4th-order highpass Butterworth filter at 0.05 Hz (baseline wander removal).
+    - 4th-order lowpass Butterworth filter at 150.0 Hz (high-frequency muscle noise suppression).
+    - 2nd-order IIR notch filter at 50.0 Hz (Q=30) for AC power line interference.
+    
+    All stages utilize zero-phase forward-backward filtering (`scipy.signal.filtfilt`).
+    
+    Args:
+        signal (np.ndarray): Input raw detrended millivolt ECG signal.
+        fs (float): Sampling frequency in Hz.
+        
+    Returns:
+        np.ndarray: Filtered diagnostic ECG signal trimmed back to original length.
+    """
     pad_len = int(fs * 2)
     padded_signal = np.pad(signal, (pad_len, pad_len), mode='edge')
     nyquist = fs / 2.0
@@ -572,7 +655,31 @@ def apply_iec_diagnostic_filter(signal, fs):
     else:
         signal_filtered = signal_lp
     return signal_filtered[pad_len:-pad_len]
+
+
 def wavelet_denoise(x, fs, wavelet='sym6', level=None, mode='symmetric', method='soft', protect_low_hz=2.0, protect_band=(1.0, 40.0), protect_factor=0.5):
+    """Performs multi-resolution wavelet denoising with cardiac band protection.
+    
+    Decomposes the signal using Symlet wavelets (default 'sym6'). Uses Donoho's
+    universal threshold with a robust noise variance estimator (MAD / 0.6745).
+    Crucially, detail coefficients spanning the primary diagnostic cardiac band
+    (1.0 Hz to 40.0 Hz) receive threshold attenuation (protect_factor=0.5) to
+    preserve sharp R-peak and QRS morphologies, while sub-2.0 Hz details are left untouched.
+    
+    Args:
+        x (np.ndarray): 1D filtered ECG signal array.
+        fs (float): Sampling frequency in Hz.
+        wavelet (str): Mother wavelet name (default 'sym6').
+        level (int, optional): DWT decomposition level (default min(5, max_level)).
+        mode (str): Signal extension mode for PyWavelets (default 'symmetric').
+        method (str): Thresholding method ('soft' or 'hard').
+        protect_low_hz (float): Frequency below which thresholding is disabled.
+        protect_band (tuple[float, float]): Frequency band where threshold is scaled.
+        protect_factor (float): Multiplier for threshold in the protected band.
+        
+    Returns:
+        np.ndarray: Denoised ECG signal reconstructed via Inverse DWT.
+    """
     x = np.asarray(x, dtype=float)
     w = pywt.Wavelet(wavelet)
     maxlev = pywt.dwt_max_level(len(x), w.dec_len)
@@ -593,7 +700,23 @@ def wavelet_denoise(x, fs, wavelet='sym6', level=None, mode='symmetric', method=
         new_coeffs.append(cD_th)
     y = pywt.waverec(new_coeffs, w, mode=mode)
     return y[:len(x)]
+
+
 def _qrs_ms_from_Ronset_Roffset(beat_index, anchor_sample, waves_dwt, rpeaks, Fs):
+    """Fallback calculation for QRS duration based on R-onset and R-offset markers.
+    
+    Used when NeuroKit2 fails to identify distinct Q or S peaks (e.g. QS patterns).
+    
+    Args:
+        beat_index (int): Index of current cardiac cycle.
+        anchor_sample (float): Reference sample position.
+        waves_dwt (dict): Delineated wave fiducial markers dictionary.
+        rpeaks (dict): Detected R-peak locations.
+        Fs (float): Sampling frequency in Hz.
+        
+    Returns:
+        float or None: QRS complex duration in milliseconds.
+    """
     rpeaks_arr = np.array([x for x in rpeaks['ECG_R_Peaks'] if not np.isnan(x)], dtype=int)
     r_onsets = np.array([x for x in waves_dwt['ECG_R_Onsets'] if not np.isnan(x)], dtype=int)
     r_offsets = np.array([x for x in waves_dwt['ECG_R_Offsets'] if not np.isnan(x)], dtype=int)
@@ -605,7 +728,27 @@ def _qrs_ms_from_Ronset_Roffset(beat_index, anchor_sample, waves_dwt, rpeaks, Fs
     onset, offset = int(onset_candidates.max()), int(offset_candidates.min())
     if offset <= onset: return None
     return ((offset - onset) / Fs) * 1000.0
+
+
 def _qt_last_resort_pairing(R_onsets, T_marks, Fs, rr_ms=None, min_abs_ms=160.0, max_abs_ms=600.0):
+    """Robust fallback algorithm to pair R-onsets with T-wave offsets/peaks.
+    
+    Enforces physiological boundary constraints (0.20 * RR <= QT <= 0.60 * RR
+    within absolute limits [160ms, 600ms]) to prevent mismatching adjacent beats.
+    
+    Args:
+        R_onsets (array-like): Sample positions of R wave onsets.
+        T_marks (array-like): Sample positions of T wave offsets or peaks.
+        Fs (float): Sampling rate in Hz.
+        rr_ms (float, optional): Mean RR interval in ms for adaptive scaling.
+        min_abs_ms (float): Minimum permissible absolute QT interval.
+        max_abs_ms (float): Maximum permissible absolute QT interval.
+        
+    Returns:
+        tuple[list[float], float]:
+            - qt_ms: List of calculated valid QT durations in ms.
+            - median_qt: Median QT duration or np.nan if unresolvable.
+    """
     R, T = np.asarray(R_onsets, dtype=float), np.asarray(T_marks, dtype=float)
     R, T = R[~np.isnan(R)], T[~np.isnan(T)]
     if len(R) == 0 or len(T) == 0: return [], np.nan
@@ -622,7 +765,26 @@ def _qt_last_resort_pairing(R_onsets, T_marks, Fs, rr_ms=None, min_abs_ms=160.0,
                 if lo <= ((T[jj] - r) * 1000.0 / Fs) <= hi: qt_ms.append(((T[jj] - r) * 1000.0 / Fs)); j = jj; chosen = True; break
                 jj += 1
     return qt_ms, (float(np.nanmedian(qt_ms)) if len(qt_ms) else np.nan)
+
+
 def predict_clusters_xgb_integrated(new_data, xgb_binary_model, kmeans_abnormal, abnormal_label_offset=1):
+    """Executes the two-stage classification and clustering inference pipeline.
+    
+    Stage 1: XGBoost binary classifier splits cases into Normal (1) vs Abnormal (0).
+    Stage 2: K-Means model clusters abnormal cases into slow vs fast arrhythmia categories.
+    
+    Args:
+        new_data (np.ndarray or pd.DataFrame): Standardized 96-feature array.
+        xgb_binary_model: Pretrained XGBoost binary classifier.
+        kmeans_abnormal: Pretrained K-Means clustering model for abnormal rhythms.
+        abnormal_label_offset (int): Offset added to cluster indices.
+        
+    Returns:
+        np.ndarray: Array of diagnostic label strings:
+            - 'Normal'
+            - 'Potential Slow Arrhytmia'
+            - 'Potential Fast Arrhytmia'
+    """
     is_normal = xgb_binary_model.predict(new_data)
     labels_int = np.full(len(new_data), -999, dtype=int)
     idx_norm = np.where(is_normal == 1)[0]; labels_int[idx_norm] = 0
@@ -633,18 +795,37 @@ def predict_clusters_xgb_integrated(new_data, xgb_binary_model, kmeans_abnormal,
     name_map = {0: "Normal", 1: "Potential Slow Arrhytmia", 2: "Potential Fast Arrhytmia"}
     return np.array([name_map.get(i, f"Cluster {i}") for i in labels_int])
 
-# MODIFIED
 def run_analysis_pipeline(recording_id, subject_id, device_id):
+    """Executes the asynchronous post-recording DSP, feature extraction, and ML pipeline.
+    
+    Workflow:
+    1. Queries BigQuery (`ecg_raw_per_sample`) for the recorded 8000 samples by recording_id.
+    2. Iterates across all 12 leads and executes the 6-stage DSP cleaning pipeline:
+       - Desaturation (`desaturate_edges`)
+       - Hampel impulse despiking (`despike_hampel`)
+       - Millivolt scaling (`to_mV`) and DC detrending
+       - IEC 60601-2-51 filtering (`apply_iec_diagnostic_filter`)
+       - Symlet-6 wavelet denoising (`wavelet_denoise`)
+    3. Delineates P, Q, R, S, T waves via NeuroKit2 and extracts 96 morphological features.
+    4. Normalizes features with `scaler.joblib` and evaluates with `model_xgb_binary.joblib`
+       and `kmeans_abnormal_model.joblib`.
+    5. Persists the final diagnosis string into BigQuery (`ecg_classifications`).
+    6. Emits `history_updated` to notify all connected web clients to refresh their tables.
+    7. Resets device state back to 'Idle'.
+    
+    Args:
+        recording_id (str): UUID4 of the completed recording session.
+        subject_id (str): Patient identifier string.
+        device_id (str): Originating Holter device ID.
+    """
     try:
-        print(f"[{recording_id}][{device_id}] Memulai pipeline analisis...")
-        # ... (kode analisis yang ada tetap sama)
-        # ... (setelah semua analisis selesai, baik berhasil atau gagal) ...
+        print(f"[{recording_id}][{device_id}] Starting analysis pipeline...")
         query = f"SELECT * FROM `{RAW_TABLE_REF}` WHERE recording_id = @rec_id ORDER BY timestamp"
         params = [bigquery.ScalarQueryParameter("rec_id", "STRING", recording_id)]
         config = bigquery.QueryJobConfig(query_parameters=params)
         df = bq.query(query, job_config=config).to_dataframe()
 
-        if len(df) < 500: raise ValueError(f"Data tidak cukup untuk analisis (hanya {len(df)} baris)")
+        if len(df) < 500: raise ValueError(f"Insufficient data for analysis (only {len(df)} rows)")
         
         Fs = SPS
         packedData = {}
@@ -704,9 +885,9 @@ def run_analysis_pipeline(recording_id, subject_id, device_id):
                 lead_lower = lead_str.lower()
                 packedData.update({f"rr_{lead_lower}": RR_avg, f"rr_std_{lead_lower}": RR_stdev, f"pr_{lead_lower}": PR_avg, f"qs_{lead_lower}": QS_avg, f"qtc_{lead_lower}": QTc_avg, f"st_{lead_lower}": ST_avg, f"rs_ratio_{lead_lower}": RS_ratio, f"heartrate_{lead_lower}": bpm})
             except Exception as e_lead:
-                print(f"[{recording_id}][{device_id}] Gagal memproses lead {lead_str}: {e_lead}")
+                print(f"[{recording_id}][{device_id}] Failed to process lead {lead_str}: {e_lead}")
 
-        classification = "Error: Model tidak dimuat atau data fitur gagal diekstrak."
+        classification = "Error: Models not loaded or feature extraction failed."
         if all([scaler, model_xgb, kmeans_abnormal]):
             FEATURE_FAMILIES = ['rr', 'rr_std', 'pr', 'qs', 'qtc', 'st', 'rs_ratio', 'heartrate']
             EXPECTED_FEATURES = [f"{fam}_{l.lower()}" for l in LEAD_KEYS_STRING for fam in FEATURE_FAMILIES]
@@ -715,37 +896,44 @@ def run_analysis_pipeline(recording_id, subject_id, device_id):
             X_scaled = scaler.transform(X)
             classification = predict_clusters_xgb_integrated(X_scaled, model_xgb, kmeans_abnormal)[0]
 
-        print(f"[{recording_id}][{device_id}] Hasil klasifikasi final: {classification}")
+        print(f"[{recording_id}][{device_id}] Final classification result: {classification}")
         cls_row = [{"timestamp": datetime.now(timezone.utc).isoformat(), "device_id": device_id, "recording_id": recording_id, "subject_id": subject_id, "classification": classification}]
         errors = bq.insert_rows_json(CLS_TABLE_REF, cls_row)
         if not errors: 
-            print(f"[{recording_id}][{device_id}] Hasil analisis berhasil disimpan.")
+            print(f"[{recording_id}][{device_id}] Analysis results successfully saved.")
             socketio.emit('history_updated')
         else: 
-            print(f"[{recording_id}][{device_id}] Gagal menyimpan hasil analisis: {errors}")
+            print(f"[{recording_id}][{device_id}] Failed to save analysis results: {errors}")
             
     except Exception as e:
-        print(f"[{recording_id}][{device_id}] Gagal total dalam pipeline analisis: {e}\n{traceback.format_exc()}")
-        cls_row = [{"timestamp": datetime.now(timezone.utc).isoformat(), "device_id": device_id, "recording_id": recording_id, "subject_id": subject_id, "classification": "Error Analisis Sistem"}]
+        print(f"[{recording_id}][{device_id}] Critical failure in analysis pipeline: {e}\n{traceback.format_exc()}")
+        cls_row = [{"timestamp": datetime.now(timezone.utc).isoformat(), "device_id": device_id, "recording_id": recording_id, "subject_id": subject_id, "classification": "System Analysis Error"}]
         bq.insert_rows_json(CLS_TABLE_REF, cls_row)
         socketio.emit('history_updated')
     finally:
-        # <-- ADDED BLOCK
         if device_id in device_states:
             state = device_states[device_id]
             state["status_message"] = "Idle"
             state["recording_id"] = None
             state["subject_id"] = None
             state["samples_collected"] = 0
-            # Kirim pembaruan status terakhir ke UI
             send_state_update(device_id, room=device_id)
-            print(f"[{device_id}] Status dikembalikan ke Idle.")
+            print(f"[{device_id}] Status reset to Idle.")
 
 
 # ==================================================================
-# Rute Flask & Handler Socket.IO
+# Flask Routes & Socket.IO Handlers
 # ==================================================================
 def send_state_update(device_id, room):
+    """Broadcasts the current device state dictionary to a specific Socket.IO room.
+    
+    Serializes internal deque instances (e.g. latency histories) to lists
+    to ensure JSON compatibility.
+    
+    Args:
+        device_id (str): Device identifier.
+        room (str): Socket.IO room name or client session ID (sid).
+    """
     if device_id not in device_states: return
     
     state = device_states[device_id]
@@ -759,10 +947,17 @@ def send_state_update(device_id, room):
 
 @app.route("/")
 def index():
+    """Serves the single-page HTML application dashboard."""
     return render_template_string(HTML_TEMPLATE, broker=MQTT_BROKER, port=MQTT_PORT, topic=MQTT_TOPIC)
 
 @app.route("/api/history")
 def get_history():
+    """Fetches the 50 most recent ECG classifications from BigQuery.
+    
+    Returns:
+        JSON response list containing timestamp, device_id, subject_id,
+        recording_id, and classification label.
+    """
     try:
         query = f"SELECT * FROM `{CLS_TABLE_REF}` ORDER BY timestamp DESC LIMIT 50"
         return jsonify([dict(row) for row in bq.query(query).result()])
@@ -771,24 +966,28 @@ def get_history():
 
 @socketio.on('connect')
 def on_connect_socket():
-    print(f"Klien terhubung: {request.sid}")
+    """Handles WebSocket client connection and pushes active device list."""
+    print(f"Client connected: {request.sid}")
     socketio.emit('device_list_update', list(d for d in device_states if d is not None))
 
 @socketio.on('disconnect')
 def on_disconnect():
-    print(f"Klien terputus: {request.sid}")
+    """Handles WebSocket client disconnection."""
+    print(f"Client disconnected: {request.sid}")
 
 @socketio.on('subscribe_to_device')
 def handle_subscribe(data):
+    """Subscribes client socket to a specific device room for filtered data streaming."""
     device_id = data.get('device_id')
     if not device_id: return
     
     join_room(device_id)
-    print(f"Klien {request.sid} subscribe ke device: {device_id}")
+    print(f"Client {request.sid} subscribed to device: {device_id}")
     send_state_update(device_id, room=request.sid)
 
 @socketio.on('start_recording')
 def start_recording(data):
+    """Initializes a new recording session for the target device."""
     device_id = data.get("device_id")
     subject_id = data.get("subject_id")
     if not device_id or not subject_id: return
@@ -802,15 +1001,22 @@ def start_recording(data):
     })
     device_states[device_id] = state
     
-    print(f"Memulai perekaman untuk device {device_id} (Subjek: {subject_id}) dengan ID: {state['recording_id']}")
+    print(f"Starting recording for device {device_id} (Subject: {subject_id}) with ID: {state['recording_id']}")
     send_state_update(device_id, room=device_id)
 
 @socketio.on('stop_recording')
 def stop_recording_handler(data):
+    """Handles manual recording halt requested via the web UI."""
     device_id = (data or {}).get("device_id")
     stop_recording(device_id=device_id, manual=True)
 
 def stop_recording(device_id, manual):
+    """Halts active recording session and dispatches the background ML analysis pipeline.
+    
+    Args:
+        device_id (str): Target Holter device ID.
+        manual (bool): True if triggered by user button; False if triggered by buffer completion.
+    """
     state = device_states.get(device_id)
     if not device_id or not state or not state.get("is_recording"): return
 
@@ -818,15 +1024,15 @@ def stop_recording(device_id, manual):
     sub_id = state['subject_id']
     
     state["is_recording"] = False
-    state["status_message"] = "Perekaman selesai. Memulai analisis..."
+    state["status_message"] = "Recording finished. Starting analysis..."
     
-    print(f"Perekaman {rec_id} untuk device {device_id} dihentikan. Memulai analisis di latar belakang.")
+    print(f"Recording {rec_id} for device {device_id} stopped. Starting background analysis.")
     send_state_update(device_id, room=device_id)
     socketio.start_background_task(run_analysis_pipeline, rec_id, sub_id, device_id)
 
 
 # ==================================================================
-# Klien MQTT
+# MQTT Client
 # ==================================================================
 try:
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -834,13 +1040,31 @@ except TypeError:
     mqtt_client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc, properties=None):
+    """Callback triggered upon establishing connection with the MQTT broker.
+    
+    Subscribes to MQTT_TOPIC (default: 'ecg/+/data') upon success (rc == 0).
+    """
     if rc == 0:
         client.subscribe(MQTT_TOPIC)
-        print(f"[MQTT] Terhubung dan berlangganan ke topik: {MQTT_TOPIC}")
+        print(f"[MQTT] Connected and subscribed to topic: {MQTT_TOPIC}")
     else:
-        print(f"[MQTT] Gagal terhubung, kode: {rc}")
+        print(f"[MQTT] Failed to connect, code: {rc}")
 
 def on_message(client, userdata, msg):
+    """Handles incoming binary MQTT telemetry packets from ECG Holters.
+    
+    Workflow:
+    1. Extracts device_id from topic ('ecg/{device_id}/data').
+    2. Initializes device state tracking on first packet receipt.
+    3. Validates framing delimiters (STX=0x02, ETX=0x03) and 8-bit checksum.
+    4. Decodes binary payload:
+       - 63-byte frame: Little-endian uint64 timestamp, uint32 counter, 12x int32 leads.
+       - 51-byte frame: Little-endian 12x int32 leads (legacy format).
+    5. Computes network QoS metrics (latency, jitter, packet loss).
+    6. Broadcasts `live_data` and `performance_update` to device room.
+    7. If active recording session, buffers raw samples to `live_buffer` and
+       triggers `stop_recording` when BUFFER_SIZE (8000) is reached.
+    """
     try:
         parts = msg.topic.split('/')
         if len(parts) != 3 or parts[0] != 'ecg' or parts[2] != 'data':
@@ -858,7 +1082,7 @@ def on_message(client, userdata, msg):
             socketio.emit('device_list_update', list(device_states.keys()))
         
         state = device_states[device_id]
-        state['last_seen'] = time.time() # <-- ADDED
+        state['last_seen'] = time.time()
         
         payload = msg.payload
         perform_metrics = False
@@ -949,13 +1173,18 @@ def on_message(client, userdata, msg):
                 stop_recording(device_id=device_id, manual=False)
                 
     except Exception as e:
-        print(f"[MQTT] Error memproses pesan dari topik {msg.topic}: {e}\n{traceback.format_exc()}")
+        print(f"[MQTT] Error processing message from topic {msg.topic}: {e}\n{traceback.format_exc()}")
 
 # ==================================================================
-# Background Tasks (MODIFIED)
+# Background Tasks & Workers
 # ==================================================================
 def device_cleanup_task():
-    """Periodically removes devices that have timed out."""
+    """Periodically purges inactive devices exceeding DEVICE_TIMEOUT_S.
+    
+    Runs every 5 seconds. If a device has not published a packet within
+    DEVICE_TIMEOUT_S (default 15s), it is removed from `device_states` and
+    an updated `device_list_update` event is broadcasted to all clients.
+    """
     while True:
         now = time.time()
         timed_out_devices = [
@@ -968,13 +1197,17 @@ def device_cleanup_task():
             for device_id in timed_out_devices:
                 del device_states[device_id]
             
-            # Beri tahu semua klien tentang daftar perangkat yang diperbarui
             socketio.emit('device_list_update', list(device_states.keys()))
 
-        socketio.sleep(5) # Jalankan pemeriksaan setiap 5 detik
+        socketio.sleep(5)
 
 
 def global_perf_emitter():
+    """Periodically broadcasts a global multi-device QoS overview table.
+    
+    Runs every 2 seconds, emitting `global_performance_update` containing
+    status, packet format, latency, jitter, and loss percentage for all active devices.
+    """
     while True:
         summary = []
         for device_id, state in list(device_states.items()):
@@ -997,7 +1230,8 @@ def global_perf_emitter():
         socketio.sleep(2)
 
 def start_mqtt_client():
-    print("Memulai klien MQTT...")
+    """Initializes and connects the asynchronous Paho-MQTT client."""
+    print("Starting MQTT client...")
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
     mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
@@ -1005,6 +1239,11 @@ def start_mqtt_client():
     mqtt_client.loop_start()
 
 def bq_inserter():
+    """Background worker continuously draining live_buffer into BigQuery.
+    
+    Flushes queued raw ECG sample dictionaries in batches every 1 second
+    to the `ecg_raw_per_sample` table using `insert_rows_json`.
+    """
     while True:
         if len(live_buffer) > 0:
             items_to_insert = []
@@ -1014,12 +1253,17 @@ def bq_inserter():
                 try:
                     errors = bq.insert_rows_json(RAW_TABLE_REF, items_to_insert)
                     if errors:
-                        print(f"Kesalahan saat memasukkan data EKG ke BigQuery: {errors}")
+                        print(f"Error inserting ECG data into BigQuery: {errors}")
                 except Exception as e:
-                    print(f"Exception saat memasukkan data EKG ke BigQuery: {e}")
+                    print(f"Exception inserting ECG data into BigQuery: {e}")
         socketio.sleep(1)
 
 def bq_perf_inserter():
+    """Background worker continuously draining perf_buffer into BigQuery.
+    
+    Flushes queued network QoS metric records in batches every 2 seconds
+    to the `ecg_performance_metrics` table using `insert_rows_json`.
+    """
     while True:
         if len(perf_buffer) > 0:
             items_to_insert = []
@@ -1029,20 +1273,20 @@ def bq_perf_inserter():
                 try:
                     errors = bq.insert_rows_json(PERF_TABLE_REF, items_to_insert)
                     if errors:
-                        print(f"Kesalahan saat memasukkan data performa ke BigQuery: {errors}")
+                        print(f"Error inserting performance data into BigQuery: {errors}")
                 except Exception as e:
-                    print(f"Exception saat memasukkan data performa ke BigQuery: {e}")
+                    print(f"Exception inserting performance data into BigQuery: {e}")
         socketio.sleep(2) 
 
 # ==================================================================
-# Main (MODIFIED)
+# Application Entry Point
 # ==================================================================
 if __name__ == "__main__":
     start_mqtt_client()
     socketio.start_background_task(bq_inserter)
     socketio.start_background_task(bq_perf_inserter)
     socketio.start_background_task(global_perf_emitter) 
-    socketio.start_background_task(device_cleanup_task) # <-- ADDED
-    print(f"Menjalankan server web di http://0.0.0.0:{FLASK_PORT}")
+    socketio.start_background_task(device_cleanup_task)
+    print(f"Running web server at http://0.0.0.0:{FLASK_PORT}")
     socketio.run(app, host="0.0.0.0", port=FLASK_PORT, use_reloader=False)
 

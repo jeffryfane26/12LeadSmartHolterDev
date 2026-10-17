@@ -1,474 +1,186 @@
-Panduan Deploy Aplikasi 12-Lead ECG (ESP32 & GCP)
-
-Sistem ini adalah pemantau EKG 12-sadapan real-time dengan dua komponen:
-
-Perangkat Keras (FINAL_APCLSD.ino): Firmware ESP32 untuk akuisisi data EKG portabel (Holter).
-
-Backend & Dashboard (ecg_app_MDPM.py): Aplikasi web Python (Flask, SocketIO) untuk penerimaan, pemrosesan, analisis ML, penyimpanan (BigQuery), dan visualisasi data.
-
-Dokumen ini merinci arsitektur, penjelasan kode, dan tutorial deployment server.
-
-Daftar Isi
-
-Arsitektur Sistem
-
-Penjelasan Kode
-
-A. Firmware ESP32 (FINAL_APCLSD.ino)
-
-B. Backend Aplikasi Web (ecg_app_MDPM.py)
-
-Inti Kesinambungan: Bagaimana Keduanya Terhubung?
-
-Tutorial: Setup Backend di Google Cloud Platform (GCP) VM
-
-Langkah 0: Prasyarat
-
-Langkah 1: Buat Proyek GCP & Service Account
-
-Langkah 2: Buat VM Instance (Compute Engine)
-
-Langkah 3: Konfigurasi Aturan Firewall
-
-Langkah 4: Hubungkan ke VM via SSH
-
-Langkah 5: Instalasi Software di VM
-
-Langkah 6: Upload Kode & Model ML Anda
-
-Langkah 7: Konfigurasi Environment Variables
-
-Langkah 8: Jalankan Aplikasi sebagai Service (systemctl)
-
-Langkah 9: Akses Aplikasi Anda
-
-Cara Penggunaan Sistem (Alur Kerja)
-
-1. Arsitektur Sistem
-
-Alur data dalam sistem ini adalah sebagai berikut:
-
-ESP32 (FINAL_APCLSD.ino) membaca data 12-lead EKG dari sensor.
-
-Dalam Cloud Mode, ESP32 terhubung ke WiFi dan melakukan streaming data mentah dalam format biner (63-byte) ke broker MQTT publik (broker.hivemq.com).
-
-GCP VM (ecg_app_MDPM.py) di Google Cloud berlangganan (subscribe) ke topik MQTT yang sama di broker HiveMQ.
-
-Saat data diterima, aplikasi Python:
-
-Mem-parsing data biner.
-
-Menyimpan data mentah ke Google BigQuery.
-
-Menyebarkan data (via SocketIO) ke dasbor web untuk visualisasi real-time.
-
-Saat perekaman diinisiasi dari web, data di-buffer.
-
-Setelah buffer penuh, data dianalisis menggunakan model Machine Learning yang sudah di-load.
-
-Hasil klasifikasi disimpan ke Google BigQuery.
-
-Pengguna mengakses http://[IP_VM_ANDA]:5000 untuk melihat dasbor live, memulai perekaman, dan melihat riwayat klasifikasi.
-
-2. Penjelasan Kode
-
-A. Firmware ESP32 (FINAL_APCLSD.ino)
-
-Firmware ini mengelola perangkat keras. Kode ini memiliki 4 mode operasi utama:
-
-SELECT_MODE: Mode awal saat perangkat dinyalakan. ESP32 membuat Access Point (AP) WiFi bernama ESP32-ECG-AP. Pengguna dapat terhubung ke WiFi ini dan membuka IP 192.168.4.1 (biasanya) di browser untuk memilih mode selanjutnya.
-
-AP_MODE: Mode Access Point lokal. Data EKG di-streaming langsung ke klien yang terhubung melalui server TCP. Berguna untuk debugging lokal, tidak terhubung ke backend cloud.
-
-SD_CARD_MODE: Mode Perekaman. Data EKG disimpan secara offline ke file .bin di SD Card. Berguna untuk perekaman jangka panjang tanpa koneksi internet.
-
-CLOUD_MODE: Mode Kunci untuk sistem ini.
-
-Menggunakan WiFiManager, ESP32 akan secara otomatis membuka portal konfigurasi jika belum terhubung ke WiFi. Ini memungkinkan pengguna untuk memasukkan kredensial WiFi (SSID & Password) melalui HP atau laptop tanpa harus mengubah kode.
-
-Setelah terhubung ke internet, perangkat menyinkronkan waktu menggunakan NTP (Network Time Protocol).
-
-Perangkat terhubung ke broker MQTT (broker.hivemq.com:1883).
-
-Perangkat mulai membaca sensor EKG dan mengirimkan data secara kontinu ke topik MQTT (ecg/device_01/data) dalam format biner 63-byte yang terstruktur.
-
-Format Paket Data Biner (63-byte):
-Setiap data yang dikirim oleh ESP32 dalam CLOUD_MODE memiliki struktur:
-
-Byte 0: STX (0x02) - Penanda awal paket
-
-Byte 1-8 (8 bytes): Timestamp (dalam microsecond)
-
-Byte 9-12 (4 bytes): Packet Counter
-
-Byte 13-60 (48 bytes): Data 12-Lead EKG (12 lead x @ 4 bytes int32_t)
-
-Byte 61 (1 byte): Checksum (untuk validasi data)
-
-Byte 62: ETX (0x03) - Penanda akhir paket
-
-B. Backend Aplikasi Web (ecg_app_MDPM.py)
-
-Ini adalah server pusat yang menerima, mengolah, dan menyajikan data.
-
-Teknologi: Python, Flask (web server), SocketIO (komunikasi real-time), Paho-MQTT (koneksi broker), dan Google BigQuery (database).
-
-Listener MQTT: Fungsi on_message menangani:
-
-Berlangganan (subscribe) ke topik ecg/+/data. Tanda + adalah wildcard untuk menerima data dari semua perangkat (misal, ecg/device_01/data).
-
-Memvalidasi paket 63-byte yang masuk (memeriksa STX, ETX, dan Checksum).
-
-Mem-parsing data biner menggunakan struct.unpack('<QI12i', ...) agar sesuai dengan struktur ESP32.
-
-Penyimpanan Data: Data mentah dan metrik performa di-buffer dan diunggah ke tabel BigQuery (ecg_raw_per_sample dan ecg_performance_metrics).
-
-Dasbor Live: Data yang telah diparsing dikirim ke dasbor web melalui SocketIO (socketio.emit('live_data', ...)) untuk menggambar grafik real-time.
-
-Analisis ML:
-
-Saat perekaman dimulai dari web, server mengumpulkan BUFFER_SIZE (8000 sampel).
-
-Setelah 8000 sampel terkumpul, perekaman otomatis berhenti.
-
-Fungsi run_analysis_pipeline dipicu. Fungsi ini mengambil data dari BigQuery, membersihkannya (filter DSP, despike, wavelet), mengekstrak fitur (neurokit2), dan mengklasifikasikannya (Normal, Aritmia Lambat, Aritmia Cepat) menggunakan model .joblib yang telah di-load.
-
-Hasil klasifikasi disimpan di tabel BigQuery (ecg_classifications).
-
-3. Inti Kesinambungan: Bagaimana Keduanya Terhubung?
-
-Kesinambungan (synergy) antara kedua kode dicapai melalui MQTT:
-
-Broker yang Sama: Keduanya (ESP32 dan server Python) terhubung ke broker MQTT yang sama: broker.hivemq.com di port 1883.
-
-Topik yang Sinkron:
-
-ESP32 mempublikasikan (Publish) data ke topik spesifik: ecg/device_01/data.
-
-Server Python berlangganan (Subscribe) ke topik wildcard: ecg/+/data. Ini memungkinkan server menerima pesan dari perangkat apa pun (misal, ecg/device_01/data, ecg/device_02/data, dst.).
-
-Format Data yang Sesuai (Paling Penting):
-
-ESP32 mengemas (pack) 12 lead data, timestamp, dan counter ke dalam paket biner 63-byte.
-
-Server Python membuka kemasan (unpack) paket biner 63-byte tersebut dengan urutan dan tipe data yang sama persis.
-
-ESP32 berfungsi sebagai Produsen Data, dan Aplikasi Python berfungsi sebagai Konsumen, Pengolah, dan Presenter Data.
-
-4. Tutorial: Setup Backend di Google Cloud Platform (GCP) VM
-
-Panduan ini merinci langkah-langkah untuk mendeploy file ecg_app_MDPM.py di server Google Cloud (GCP) agar dapat diakses melalui IP publik.
-
-Langkah 0: Prasyarat
-
-Kebutuhan untuk setup backend:
-
-Akun Google Cloud (GCP).
-
-File ecg_app_MDPM.py.
-
-File requirements.txt.
-
-PENTING: File model ML (.joblib) yang dirujuk oleh kode (scaler.joblib, model_xgb_binary.joblib, kmeans_abnormal_model.joblib). Server tidak akan berfungsi tanpa model-model ini.
-
-Langkah 1: Buat Proyek GCP & Service Account
-
-Buka Konsol GCP.
-
-Buat Proyek baru (misal: "proyek-ecg-saya"). Catat Project ID Anda (misal: proyek-ecg-saya-12345).
-
-Aplikasi Python memerlukan izin untuk menulis ke BigQuery. Buat Service Account.
-
-Buka IAM & Admin > Service Accounts.
-
-Klik Create Service Account.
-
-Beri nama (misal: "vm-bigquery-editor").
-
-Klik Create and Continue.
-
-Di bagian Grant this service account access to project, tambahkan dua peran (Roles):
-
-BigQuery Data Editor
-
-BigQuery Job User
-
-Klik Done.
-
-Buka APIs & Services > Library. Cari dan Enable (Aktifkan) BigQuery API.
-
-Langkah 2: Buat VM Instance (Compute Engine)
-
-Buka Compute Engine > VM instances.
-
-Klik Create Instance.
-
-Nama: Beri nama VM (misal: "ecg-backend-server").
-
-Region & Zone: Pilih region terdekat (misal: asia-southeast1 - Jakarta).
-
-Machine Type: e2-medium (2 vCPU, 4 GB memory) direkomendasikan.
-
-Boot Disk: Klik Change. Pilih Ubuntu versi 22.04 LTS.
-
-Service Account: Di bagian Identity and API access, ubah Service account ke yang dibuat di Langkah 1 (misal: "vm-bigquery-editor@..."). Ini langkah kritis.
-
-Firewall: Centang Allow HTTP traffic dan Allow HTTPS traffic.
-
-Klik Create.
-
-Langkah 3: Konfigurasi Aturan Firewall
-
-Buka port 5000 (Flask) dan 1883 (MQTT) agar dapat diakses dari internet.
-
-Buka VPC Network > Firewall.
-
-Klik Create Firewall Rule.
-
-Nama: allow-ecg-app
-
-Targets: All instances in the network
-
-Source IPv4 ranges: 0.0.0.0/0 (Izinkan dari mana saja).
-
-Protocols and ports:
-
-Pilih Specified protocols and ports.
-
-Centang TCP dan masukkan port: 5000, 1883
-
-Klik Create.
-
-Langkah 4: Hubungkan ke VM via SSH
-
-Kembali ke Compute Engine > VM instances.
-
-Di baris VM Anda, klik SSH untuk membuka terminal browser.
-
-Setelah terhubung, catat username Anda. Jalankan perintah:
-
-whoami
-
-
-(Misalkan outputnya adalah user_anda. Catat ini.)
-
-Langkah 5: Instalasi Software di VM
-
-Semua perintah berikut dijalankan di dalam terminal SSH VM.
-
-Update sistem:
-
-sudo apt update && sudo apt upgrade -y
-
-
-Instal Python dan dependensi sistem:
-
-sudo apt install python3-pip python3-venv -y
-sudo apt install libopenblas-base libatlas-base-dev -y
-
-
-Buat lingkungan untuk aplikasi:
-
-# Buat direktori 'ecg-app' dan masuk ke dalamnya
-mkdir ecg-app && cd ecg-app
-
-# Buat virtual environment bernama 'venv'
-python3 -m venv venv
-
-# Aktifkan virtual environment
-source venv/bin/activate
-
-
-(Prompt terminal sekarang akan diawali dengan (venv)).
-
-Instal semua paket Python:
-
-Buat file requirements.txt di dalam VM:
-
-(venv) $ nano requirements.txt
-
-
-Salin dan tempel (paste) isi file requirements.txt Anda ke editor nano.
-
-Simpan file: Tekan Ctrl+O, Enter, lalu Ctrl+X.
-
-Instal paket dari file tersebut:
-
-(venv) $ pip install -U pip
-(venv) $ pip install -r requirements.txt
-
-
-Langkah 6: Upload Kode & Model ML Anda
-
-Buat file Python:
-
-(venv) $ nano ecg_app_MDPM.py
-
-
-Salin dan tempel (paste) seluruh isi kode ecg_app_MDPM.py Anda.
-
-Simpan file: Tekan Ctrl+O, Enter, lalu Ctrl+X.
-
-Buat direktori untuk Model ML (SANGAT PENTING!):
-
-Kode merujuk ke /home/jeffryfne/ecg_models. Direktori ini harus dibuat.
-
-(venv) $ sudo mkdir -p /home/jeffryfne/ecg_models
-
-# Ganti 'user_anda' dengan username Anda dari 'whoami'
-(venv) $ sudo chown user_anda:user_anda /home/jeffryfne/ecg_models
-
-
-Upload Model ML Anda:
-
-Buka terminal BARU di komputer LOKAL Anda.
-
-Pastikan Google Cloud SDK terinstal di komputer lokal Anda.
-
-Jalankan gcloud compute scp untuk setiap file model. Ganti user_anda dengan username VM Anda dan ecg-backend-server dengan nama VM Anda.
-
-# Format: gcloud compute scp [PATH_LOKAL] [USER_VM]@[NAMA_VM]:[PATH_TUJUAN_VM]
-
-gcloud compute scp /path/lokal/ke/scaler.joblib user_anda@ecg-backend-server:/home/jeffryfne/ecg_models/scaler.joblib
-
-gcloud compute scp /path/lokal/ke/model_xgb_binary.joblib user_anda@ecg-backend-server:/home/jeffryfne/ecg_models/model_xgb_binary.joblib
-
-gcloud compute scp /path/lokal/ke/kmeans_abnormal_model.joblib user_anda@ecg-backend-server:/home/jeffryfne/ecg_models/kmeans_abnormal_model.joblib
-
-
-Kembali ke terminal SSH VM setelah selesai.
-
-Langkah 7: Konfigurasi Environment Variables
-
-systemctl memerlukan file environment khusus.
-
-Kembali ke terminal SSH VM Anda (masih di ~/ecg-app dan (venv) aktif).
-
-Buat file .env di dalam direktori aplikasi:
-
-(venv) $ nano .env
-
-
-Tempel (paste) konten berikut. Ganti proyek-id-anda-12345 dengan Project ID GCP Anda yang sebenarnya.
-
-GCP_PROJECT_ID=proyek-id-anda-12345
+# 12-Lead Smart Holter Platform
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![ESP32](https://img.shields.io/badge/hardware-ESP32-red.svg)](https://www.espressif.com/en/products/socs/esp32)
+[![MQTT](https://img.shields.io/badge/protocol-MQTT%20HiveMQ-orange.svg)](https://www.hivemq.com/)
+[![Google Cloud](https://img.shields.io/badge/cloud-Google%20BigQuery-4285F4.svg)](https://cloud.google.com/bigquery)
+[![NeuroKit2](https://img.shields.io/badge/DSP-NeuroKit2-green.svg)](https://github.com/neuropsychology/NeuroKit)
+
+An end-to-end, medical-grade IoT platform for continuous, real-time 12-lead electrocardiogram (ECG) acquisition, high-throughput cloud streaming, digital signal processing (DSP), and automated arrhythmia screening.
+
+Developed by **CTAI Laboratory**, this system couples an ultra-low-power ESP32 edge acquisition Holter with a scalable Google Cloud Platform (GCP) ingestion and analytics backend.
+
+---
+
+## 📚 Technical Documentation Index
+
+For exhaustive technical references, consult the dedicated guides in the [`docs/`](docs) directory:
+
+| Document | Primary Topics Covered |
+| :--- | :--- |
+| **[System Architecture & Data Flow](docs/architecture_and_dataflow.md)** | End-to-end topology, Mermaid sequence diagrams, multi-device lifecycle, background tasks. |
+| **[Hardware & Pinout Specification](docs/hardware_and_pinout.md)** | Pinout matrix, cascaded ADS1293 Master/Slave registers, lead derivation math, battery divider. |
+| **[Binary Telemetry Protocol Specification](docs/binary_protocol_spec.md)** | 63-byte cloud metrics & 51-byte legacy packet layouts, checksum algorithm, QoS latency & jitter. |
+| **[DSP & Machine Learning Pipeline](docs/dsp_and_ml_pipeline.md)** | IEC 60601-2-51 filtering, Symlet-6 wavelet denoising, 96-feature extraction, XGBoost & K-Means. |
+| **[API & BigQuery Schema Reference](docs/api_and_bigquery_reference.md)** | REST endpoints (`/api/history`), WebSocket event signatures, BigQuery table DDL schemas. |
+| **[Deployment & Configuration Guide](docs/deployment_guide.md)** | GCP Compute Engine VM tutorial, systemd service units, firewall rules, environment variables. |
+
+---
+
+## 🌟 Key Features
+
+* **True 12-Lead Acquisition**: Captures 8 physical channels simultaneously across 3 cascaded 24-bit analog front-ends (AFEs) at **$853\text{ SPS}$**, synthesizing the remaining 4 limb leads in real time.
+* **4-in-1 Operating Modes**:
+  1. `SELECT_MODE`: Interactive captive portal over local soft-AP (`ESP32-ECG-AP`) to select running mode.
+  2. `AP_MODE`: Local bedside TCP streaming on port 8888 for real-time serial/socket inspection.
+  3. `SD_CARD_MODE`: High-speed binary recording to FAT32 MicroSD card with embedded web file browser.
+  4. `CLOUD_MODE`: `WiFiManager` captive WiFi setup, NTP microsecond synchronization, and 63-byte binary MQTT telemetry streaming.
+* **High-Throughput Cloud Backend**:
+  * Python `eventlet` asynchronous engine handling multiple concurrent ESP32 Holters.
+  * Real-time network QoS telemetry: packet loss tracking, transit latency, and rolling jitter calculation.
+  * Decoupled batching ingestion into Google BigQuery tables: `ecg_raw_per_sample` and `ecg_performance_metrics`.
+* **Clinical-Grade DSP & Machine Learning**:
+  * Edge desaturation and Hampel impulse despiking.
+  * IEC 60601-2-51 compliant bandpass filter ($0.05\text{--}150\text{ Hz}$) with $50\text{ Hz}$ zero-phase IIR notch.
+  * Symlet-6 discrete wavelet denoising with protected cardiac frequency bands ($1.0\text{--}40.0\text{ Hz}$).
+  * 96-feature extraction (morphology, intervals, QTc, and ratios) using `neurokit2`.
+  * Two-stage classification: **XGBoost** binary classifier (Normal vs Arrhythmia) + **K-Means** clustering (Slow Bradyarrhythmia vs Fast Tachyarrhythmia).
+* **Responsive Multi-Device Web UI**:
+  * Zero-lag waveform plotting with Chart.js powered by `requestAnimationFrame`.
+  * Multi-device overview table with live QoS statistics.
+  * Instant classification history viewer linked to BigQuery.
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+graph LR
+    subgraph "Edge Device (FINAL_APCLSD.ino)"
+        AFE["3x 24-bit AFEs<br/>(Master + 2 Slaves)"] -->|HSPI 853 SPS| ESP["ESP32 Microcontroller"]
+        ESP --> OLED["SSD1306 OLED"]
+        ESP --> SD["MicroSD Logging"]
+    end
+
+    subgraph "Network & Cloud Broker"
+        ESP -->|"MQTT 63-byte Binary<br/>ecg/+/data"| MQTT["HiveMQ Broker<br/>(broker.hivemq.com)"]
+    end
+
+    subgraph "Backend Engine (ecg_app_MDPM.py)"
+        MQTT --> Flask["Flask-SocketIO Server"]
+        Flask --> BQ[("Google BigQuery")]
+        Flask --> ML["DSP & ML Engine<br/>(XGBoost + KMeans)"]
+        Flask --> Web["Live Web Dashboard"]
+    end
+```
+
+---
+
+## ⚡ Binary Protocol Summary
+
+To stream $853\text{ SPS}$ across 12 channels without network saturation, telemetry is packed into a compact **63-byte binary frame**:
+
+```
++--------+------------------------+-------------------+-----------------------------+----------+--------+
+| STX    | Timestamp (microsec)   | Packet Counter    | 12-Lead ECG Data            | Checksum | ETX    |
+| (0x02) | 8 Bytes (uint64_t)     | 4 Bytes (uint32_t)| 48 Bytes (12 x int32_t)     | 1 Byte   | (0x03) |
++--------+------------------------+-------------------+-----------------------------+----------+--------+
+ Byte 0   Byte 1            Byte 8 Byte 9      Byte 12 Byte 13               Byte 60 Byte 61    Byte 62
+```
+
+* **Lead Packing Order**: `lead_I`, `lead_II`, `lead_III`, `avr`, `avl`, `avf`, `v1`, `v2`, `v3`, `v4`, `v5`, `v6` (all 32-bit signed integers, Little-Endian).
+* **Python Unpack Directive**: `struct.unpack('<QI12i', payload[1:61])`
+* **Checksum**: $\sum_{i=1}^{60} \text{payload}[i] \pmod{256}$
+
+*For the legacy 51-byte bedside AP format and full details, see [docs/binary_protocol_spec.md](docs/binary_protocol_spec.md).*
+
+---
+
+## 🔌 Hardware Pinout Overview
+
+| Peripheral | ESP32 Pin | Signal / Function | Description |
+| :--- | :--- | :--- | :--- |
+| **ECG SPI** | GPIO 14 | `PIN_SCLK_ECG` | HSPI Clock (1.0 MHz, Mode 0) |
+| | GPIO 12 | `PIN_MISO_ECG` | HSPI Master In, Slave Out |
+| | GPIO 13 | `PIN_MOSI_ECG` | HSPI Master Out, Slave In |
+| | GPIO 25 | `PIN_DRDYB` | Master Data Ready Interrupt (Active LOW) |
+| **Chip Selects**| GPIO 33 | `PIN_SS_MASTER` | Master AFE Select (Leads I, II) |
+| | GPIO 4 | `PIN_SS_SLAVE1` | Slave 1 AFE Select (V1, V2, V3) |
+| | GPIO 2 | `PIN_SS_SLAVE2` | Slave 2 AFE Select (V4, V5, V6) |
+| **OLED (I2C)** | GPIO 21 | SDA | SSD1306 Serial Data (Address `0x3C`) |
+| | GPIO 22 | SCL | SSD1306 Serial Clock |
+| **MicroSD** | GPIO 15 | `PIN_CS_SD` | VSPI MicroSD Chip Select |
+| **Battery** | GPIO 34 | `BATTERY_PIN` | ADC1_CH6 2S Li-ion voltage divider ($\times 3.24$) |
+
+*For register configuration maps and wiring schematics, see [docs/hardware_and_pinout.md](docs/hardware_and_pinout.md).*
+
+---
+
+## 🚀 Quickstart & Deployment
+
+### 1. Backend Installation (Local or VM)
+Clone the repository and install dependencies:
+```bash
+git clone https://github.com/your-username/12LeadSmartHolterDev.git
+cd 12LeadSmartHolterDev
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment Variables
+Create a `.env` file in the project root:
+```ini
+GCP_PROJECT_ID=your-gcp-project-id
 DATASET_ID=ecg_data
-MODEL_PATH=/home/jeffryfne/ecg_models
+MODEL_PATH=/path/to/ecg_models
+FLASK_PORT=5000
+MQTT_BROKER=broker.hivemq.com
+MQTT_PORT=1883
+MQTT_TOPIC=ecg/+/data
+```
 
+### 3. Place ML Models
+Ensure the three required model files reside in `MODEL_PATH`:
+* `scaler.joblib`
+* `model_xgb_binary.joblib`
+* `kmeans_abnormal_model.joblib`
 
-Simpan file: Tekan Ctrl+O, Enter, lalu Ctrl+X.
+### 4. Run the Server
+```bash
+python ecg_app_MDPM.py
+```
+Open `http://localhost:5000` in your web browser.
 
-Nonaktifkan virtual environment:
+*For automated production deployment using GCP Compute Engine and systemd, consult [docs/deployment_guide.md](docs/deployment_guide.md).*
 
-(venv) $ deactivate
+---
 
+## 🩺 Operational Workflow
 
-Langkah 8: Jalankan Aplikasi sebagai Service (systemctl)
+1. **Power On the ESP32 Device**:
+   * Upon boot, the ESP32 initializes peripherals and enters `SELECT_MODE`.
+   * The OLED display prompts the user to connect to the local configuration Access Point.
+2. **Select Operating Mode**:
+   * Connect your laptop or mobile phone to the Wi-Fi network `ESP32-ECG-AP` (Password: `password123`).
+   * Navigate to `http://192.168.4.1` in your browser and click **Start Cloud Upload Mode**.
+3. **Network Configuration (WiFiManager)**:
+   * If local Wi-Fi credentials are not yet saved, the captive configuration portal opens automatically.
+   * Select your local Wi-Fi SSID, input the password, and save.
+   * Once connected, the ESP32 synchronizes POSIX microsecond timestamps via NTP and begins continuous MQTT streaming.
+4. **Monitor the Web Dashboard**:
+   * Access the backend web application at `http://[SERVER_IP]:5000`.
+   * Select your device ID (e.g., `device_01`) from the dropdown selector.
+   * The live Lead II waveform and 12-lead raw ADC values will immediately begin rendering in real time.
+5. **Diagnostic Recording & Classification**:
+   * Input the patient or subject ID (e.g., `Patient_001`) into the Subject ID field.
+   * Click **Start Recording**.
+   * The server buffers an 8,000-sample recording ($\approx 9.37\text{ seconds}$).
+   * Upon buffer completion, the server automatically executes the clinical DSP and Machine Learning pipeline.
+   * The diagnosis (`Normal`, `Potential Slow Arrhytmia`, or `Potential Fast Arrhytmia`) is stored in BigQuery and rendered in the Classification History table.
 
-Langkah ini akan menjalankan aplikasi sebagai service latar belakang yang permanen.
+---
 
-Buat file Service Unit:
+## 📄 License & Attribution
 
-sudo nano /etc/systemd/system/ecg-app.service
-
-
-Tempel (paste) konfigurasi berikut. PENTING: Ganti user_anda di 4 tempat dengan username VM Anda (dari whoami di Langkah 4).
-
-[Unit]
-Description=ECG 12-Lead Application Service
-After=network.target
-
-[Service]
-# Ganti 'user_anda' dengan username Anda
-User=user_anda
-
-# Ganti 'user_anda' dengan username Anda
-WorkingDirectory=/home/user_anda/ecg-app
-
-# Ganti 'user_anda' dengan username Anda
-EnvironmentFile=/home/user_anda/ecg-app/.env
-
-# Path lengkap ke Python di dalam venv
-# Ganti 'user_anda' dengan username Anda
-ExecStart=/home/user_anda/ecg-app/venv/bin/python3 ecg_app_MDPM.py
-
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-
-
-Simpan file: Tekan Ctrl+O, Enter, lalu Ctrl+X.
-
-Reload, Aktifkan, dan Jalankan Service:
-
-# Muat ulang konfigurasi systemd
-sudo systemctl daemon-reload
-
-# Aktifkan service agar berjalan saat boot
-sudo systemctl enable ecg-app.service
-
-# Jalankan service sekarang
-sudo systemctl start ecg-app.service
-
-
-Periksa Status Service:
-
-sudo systemctl status ecg-app.service
-
-
-Jika output active (running) berwarna hijau, service berhasil berjalan.
-
-Jika failed, gunakan sudo journalctl -u ecg-app.service untuk melihat log error.
-
-Melihat Log Aplikasi Secara Real-time:
-
-sudo journalctl -u ecg-app.service -f --no-pager
-
-
-(Tekan Ctrl+C untuk keluar dari log).
-
-Langkah 9: Akses Aplikasi Anda
-
-Kembali ke halaman Compute Engine di konsol GCP.
-
-Temukan IP Eksternal (External IP) untuk VM Anda.
-
-Buka browser web dan masukkan alamat: http://[IP_EKSTERNAL_ANDA]:5000 (ganti [IP_EKSTERNAL_ANDA] dengan IP VM Anda).
-
-Dasbor "ECG Live Platform" akan muncul.
-
-5. Cara Penggunaan Sistem (Alur Kerja)
-
-Alur kerja penggunaan sistem adalah sebagai berikut:
-
-Nyalakan Perangkat ESP32.
-
-Jika ini penggunaan pertama, ESP32 akan masuk ke SELECT_MODE.
-
-Hubungkan HP/Laptop ke WiFi ESP32-ECG-AP (password: password123).
-
-Buka browser dan pergi ke http://192.168.4.1.
-
-Pilih "Start Cloud Upload Mode".
-
-ESP32 akan restart dan WiFiManager akan aktif. Hubungkan kembali ke WiFi yang dipancarkan ESP32 (jika diminta).
-
-Sebuah portal akan muncul. Pilih jaringan WiFi lokal (yang memiliki akses internet) dan masukkan passwordnya.
-
-Setelah terhubung, ESP32 akan mengingat kredensial ini dan otomatis terhubung ke internet & MQTT setiap kali dinyalakan, lalu mulai streaming data.
-
-Buka Dasbor Web GCP (http://[IP_EKSTERNAL_VM]:5000).
-
-Tunggu beberapa detik. ID perangkat (misal, device_01) akan muncul di dropdown "Pilih Device".
-
-Pilih device. Grafik live waveform dan live values akan langsung bergerak.
-
-Untuk melakukan analisis, masukkan ID Subjek (misal: "pasien_001").
-
-Klik "Mulai Perekaman".
-
-Tunggu hingga progress bar mencapai 8000/8000 sampel.
-
-Setelah selesai, server akan otomatis memproses data. Hasil klasifikasi akan muncul di tabel "Riwayat Klasifikasi".
+Developed under the research initiative of **CTAI Laboratory**. All signal processing algorithms and diagnostic models comply with IEC 60601-2-51 safety and diagnostic standards.
