@@ -1,6 +1,5 @@
 # 12-Lead Smart Holter Platform
 
-[![C++]
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![ESP32](https://img.shields.io/badge/hardware-ESP32-red.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![MQTT](https://img.shields.io/badge/protocol-MQTT%20HiveMQ-orange.svg)](https://www.hivemq.com/)
