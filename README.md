@@ -10,6 +10,8 @@ An end-to-end, IoT platform for continuous, real-time 12-lead electrocardiogram 
 
 Developed by **CTAI Laboratory**, this system couples an ultra-low-power ESP32 edge acquisition Holter with a scalable Google Cloud Platform (GCP) ingestion and analytics backend.
 
+PPT = https://canva.link/eng8c4crvjzicr7
+
 ---
 
 ## 📚 Technical Documentation Index
